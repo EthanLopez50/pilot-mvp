@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 MODEL_PATH = PROJECT_ROOT / "models" / "model.pkl"
 FEATURE_COLS_PATH = PROJECT_ROOT / "models" / "feature_cols.json"
+FEATURE_MEDIANS_PATH = PROJECT_ROOT / "models" / "feature_medians.json"
 LABEL_ENCODER_PATH = PROJECT_ROOT / "models" / "label_encoder.pkl"
 GRID_PATH = PROJECT_ROOT / "data" / "grid" / "features_v2.gpkg"
 AOI_DIR = PROJECT_ROOT / "data" / "aoi"
