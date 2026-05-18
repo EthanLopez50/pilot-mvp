@@ -1,0 +1,48 @@
+# Cursor Rules — Lithium Prospectivity Pilot Pipeline (MVP)
+
+## Read first
+Before any work, read docs/00_PROJECT_BRIEF.md, docs/01_ARCHITECTURE.md,
+docs/02_BUILD_PLAN.md, docs/03_CODING_STANDARDS.md, docs/04_ACCEPTANCE_TESTS.md.
+Follow them. They override default assumptions.
+
+## Scope discipline
+- This is an internally-run command-line pilot pipeline. It is NOT a web app.
+- NEVER add, scaffold, or stub: web server, REST API, frontend, database,
+  authentication, billing, customer-data upload, model training/retraining,
+  or consent logic. If a task seems to need any of these, STOP and say so —
+  the task is mis-scoped, not an invitation to add them.
+- Do exactly ONE task from docs/02_BUILD_PLAN.md per session. Do not start a
+  task whose predecessors are not complete and tested.
+
+## The model and grid are frozen inputs
+- models/model.pkl, models/feature_cols.json, models/label_encoder.pkl, and
+  data/grid/features_v2.gpkg are PROVIDED. Load them; never train, modify, or
+  regenerate them.
+- Never change the model service interface (the predict() signature and the
+  expected feature column contract) without explicit instruction in the chat.
+
+## Engineering rules
+- Write or confirm the acceptance test BEFORE implementing. Implement the
+  smallest change that passes. Run the full test suite. Then stop.
+- Determinism only: no unseeded randomness anywhere. Seed comes from config.py.
+- All paths come from config.py. No hard-coded paths elsewhere.
+- Pin every dependency with ==. Do not add a dependency without stating why.
+- Fail loudly and specifically: every error names the file, value, or column
+  at fault. Never swallow exceptions.
+- No global mutable state. One responsibility per module. Modules never reach
+  backward in the data flow defined in 01_ARCHITECTURE.md.
+
+## Output discipline
+- Do not make changes outside the scope of the current task.
+- Do not "helpfully" refactor unrelated code. If you see an unrelated problem,
+  report it; do not fix it in this task's diff.
+- Keep diffs small enough to review in ~10 minutes. If a task needs a larger
+  diff, it is mis-scoped — say so instead of proceeding.
+
+## Verbatim text
+- Use the methodology and limitations text from docs/03_CODING_STANDARDS.md
+  exactly. Do not paraphrase reviewed wording.
+
+## When unsure
+Stop and ask. A wrong assumption acted on confidently is the most expensive
+failure mode here. A clarifying question is always cheaper.
