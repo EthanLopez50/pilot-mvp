@@ -9,11 +9,22 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Image,
+    ListFlowable,
+    ListItem,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 from shapely.geometry.base import BaseGeometry
 
 from pilot import config
@@ -55,6 +66,30 @@ REPORT_STATUS_TEXT = (
 )
 
 REPORT_FILENAME = "prospectivity_report.pdf"
+COMPANY_NAME = "X-Ray Geoanalytics"
+REPORT_TITLE = "Lithium Prospectivity Assessment"
+FOOTER_TEXT = f"Produced by {COMPANY_NAME}"
+# Company logo JPEG: place the file at pilot/assets/logo.jpg (filename must be logo.jpg).
+LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.jpg"
+LOGO_COVER_WIDTH = 1.75 * inch
+
+# Readable labels for dominant_lith codes in the ranked-targets table only.
+LITHOLOGY_LABELS: dict[str, str] = {
+    "alluvium": "Alluvium",
+    "carbonate": "Carbonate",
+    "coarse_clastic": "Coarse clastic",
+    "fine_clastic": "Fine clastic",
+    "intrusive": "Intrusive",
+    "lacustrine": "Lacustrine",
+    "mafic_volcanic": "Mafic volcanic",
+    "metamorphic": "Metamorphic",
+    "other": "Other",
+    "rhyolite": "Rhyolite",
+    "sedimentary_undiff": "Sedimentary undiff",
+    "surficial": "Surficial",
+    "tuff_ignimbrite": "Tuff / ignimbrite",
+    "volcanic_undiff": "Volcanic undiff",
+}
 
 SECTION_REPORT_STATUS = "Report status and scope"
 SECTION_METHODOLOGY = "Methodology"
@@ -63,6 +98,14 @@ SECTION_RANKED_TARGETS = "Ranked targets"
 SECTION_TARGET_RATIONALES = "Target rationales"
 SECTION_LIMITATIONS = "Limitations"
 COVERAGE_HEADING = "Coverage limitation"
+
+
+def format_lithology_label(code: str) -> str:
+    """Return a readable dominant-lithology label for report tables."""
+    key = str(code).strip()
+    if key in LITHOLOGY_LABELS:
+        return LITHOLOGY_LABELS[key]
+    return " ".join(part.capitalize() for part in key.replace("_", " ").split())
 
 
 def report_path(client: str) -> Path:
@@ -77,7 +120,7 @@ def build(
     client: str,
     aoi_polygon: BaseGeometry,
     coverage: CoverageResult,
-    report_date: date,
+    report_date: date | None = None,
 ) -> Path:
     """Assemble the pilot PDF report and write it under ``outputs/<client>/``.
 
@@ -92,7 +135,7 @@ def build(
         client: Client name for the cover page and output folder.
         aoi_polygon: AOI boundary in the grid CRS (EPSG:3857).
         coverage: AOI coverage assessment from :mod:`pilot.features`.
-        report_date: Date printed on the cover page (caller controls determinism).
+        report_date: Date printed on the cover page; defaults to today when omitted.
 
     Returns:
         Path to the written PDF beside the heatmap PNG.
@@ -111,6 +154,8 @@ def build(
             f"features_df rows ({n_rows})"
         )
 
+    effective_date = report_date if report_date is not None else date.today()
+
     output_path = report_path(client)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -124,7 +169,7 @@ def build(
     _write_pdf(
         output_path=output_path,
         client=client,
-        report_date=report_date,
+        report_date=effective_date,
         coverage=coverage,
         heatmap_file=heatmap_file,
         top_targets=top_targets,
@@ -177,6 +222,65 @@ def _target_rationales(
     return [(cell_id, rationales[str(cell_id)]) for cell_id in order]
 
 
+def _rationale_bullet_lines(rationale_text: str) -> list[str]:
+    lines: list[str] = []
+    for line in rationale_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("- "):
+            stripped = stripped[2:].strip()
+        lines.append(stripped)
+    return lines
+
+
+def _cover_logo_image() -> Image | None:
+    """Return a cover-page logo flowable, or None when ``LOGO_PATH`` is missing."""
+    if not LOGO_PATH.is_file():
+        return None
+    logo = Image(str(LOGO_PATH))
+    logo.drawWidth = LOGO_COVER_WIDTH
+    logo.drawHeight = LOGO_COVER_WIDTH * (logo.imageHeight / logo.imageWidth)
+    logo.hAlign = "CENTER"
+    return logo
+
+
+def _rationale_list_flowable(rationale_text: str, bullet_style: ParagraphStyle) -> ListFlowable:
+    list_text_style = ParagraphStyle(
+        name=f"{bullet_style.name}ListText",
+        parent=bullet_style,
+        leftIndent=0,
+        firstLineIndent=0,
+        bulletIndent=0,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+    items = [
+        ListItem(Paragraph(line, list_text_style), leftIndent=14, spaceBefore=0)
+        for line in _rationale_bullet_lines(rationale_text)
+    ]
+    return ListFlowable(
+        items,
+        bulletType="bullet",
+        start="bulletchar",
+        bulletFontName="Helvetica",
+        bulletFontSize=10,
+        leftIndent=0,
+        bulletDedent=14,
+        bulletAnchor="start",
+        spaceBefore=0,
+        spaceAfter=4,
+    )
+
+
+def _content_page_footer(canvas_obj: canvas.Canvas, doc: SimpleDocTemplate) -> None:
+    canvas_obj.saveState()
+    canvas_obj.setFont("Helvetica", 8)
+    canvas_obj.setFillColor(colors.HexColor("#555555"))
+    canvas_obj.drawCentredString(letter[0] / 2.0, 0.5 * inch, FOOTER_TEXT)
+    canvas_obj.restoreState()
+
+
 def _write_pdf(
     *,
     output_path: Path,
@@ -188,46 +292,97 @@ def _write_pdf(
     target_rationales: list[tuple[str, str]],
 ) -> None:
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ReportTitle",
+    company_style = ParagraphStyle(
+        "CompanyName",
         parent=styles["Title"],
         fontName="Helvetica-Bold",
-        fontSize=20,
-        leading=24,
-        spaceAfter=12,
+        fontSize=22,
+        leading=26,
+        alignment=TA_CENTER,
+        spaceAfter=6,
+        textColor=colors.HexColor("#0B1F33"),
+    )
+    cover_title_style = ParagraphStyle(
+        "CoverTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        alignment=TA_CENTER,
+        spaceAfter=18,
+        textColor=colors.HexColor("#1A3A52"),
+    )
+    cover_meta_style = ParagraphStyle(
+        "CoverMeta",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=12,
+        leading=16,
+        alignment=TA_CENTER,
+        spaceAfter=6,
+        textColor=colors.HexColor("#333333"),
     )
     heading_style = ParagraphStyle(
         "ReportHeading",
         parent=styles["Heading2"],
         fontName="Helvetica-Bold",
-        fontSize=14,
-        leading=18,
-        spaceBefore=12,
-        spaceAfter=6,
+        fontSize=13,
+        leading=17,
+        spaceBefore=14,
+        spaceAfter=8,
+        textColor=colors.HexColor("#0B1F33"),
     )
     body_style = ParagraphStyle(
         "ReportBody",
         parent=styles["BodyText"],
         fontName="Helvetica",
-        fontSize=11,
+        fontSize=10.5,
         leading=14,
         spaceAfter=8,
+        alignment=TA_LEFT,
+    )
+    bullet_style = ParagraphStyle(
+        "RationaleBullet",
+        parent=body_style,
+        fontSize=10,
+        leading=13,
+        leftIndent=0,
+        bulletIndent=0,
+        spaceAfter=4,
+    )
+    target_heading_style = ParagraphStyle(
+        "TargetHeading",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        fontSize=10.5,
+        leading=14,
+        spaceBefore=6,
+        spaceAfter=4,
     )
     warning_style = ParagraphStyle(
         "CoverageWarning",
         parent=body_style,
         fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=15,
+        fontSize=11,
+        leading=14,
         textColor=colors.HexColor("#8B0000"),
         spaceAfter=10,
     )
 
-    story: list[object] = [
-        Paragraph(client.strip(), title_style),
-        Paragraph(f"Date: {report_date.isoformat()}", body_style),
-        Spacer(1, 0.2 * inch),
-    ]
+    story: list[object] = []
+
+    cover_logo = _cover_logo_image()
+    if cover_logo is not None:
+        story.extend([cover_logo, Spacer(1, 0.25 * inch)])
+    story.extend(
+        [
+            Paragraph(COMPANY_NAME, company_style),
+            Paragraph(REPORT_TITLE, cover_title_style),
+            Paragraph(client.strip(), cover_meta_style),
+            Paragraph(f"Report date: {report_date.isoformat()}", cover_meta_style),
+            PageBreak(),
+        ]
+    )
 
     if not coverage.adequate:
         minimum_pct = config.COVERAGE_MIN_FRACTION * 100
@@ -244,7 +399,7 @@ def _write_pdf(
                     ),
                     warning_style,
                 ),
-                Spacer(1, 0.15 * inch),
+                Spacer(1, 0.12 * inch),
             ]
         )
 
@@ -262,7 +417,7 @@ def _write_pdf(
     image = Image(str(heatmap_file))
     image.drawWidth = 6.5 * inch
     image.drawHeight = 4.5 * inch
-    story.extend([image, Spacer(1, 0.15 * inch)])
+    story.extend([image, Spacer(1, 0.12 * inch)])
 
     story.append(Paragraph(SECTION_RANKED_TARGETS, heading_style))
     if top_targets:
@@ -279,29 +434,40 @@ def _write_pdf(
             table_data.append(
                 [
                     str(row["rank"]),
-                    f"{row['latitude']:.6f}",
-                    f"{row['longitude']:.6f}",
-                    f"{row['probability']:.6f}",
-                    str(row["dominant_lith"]),
+                    f"{row['latitude']:.5f}",
+                    f"{row['longitude']:.5f}",
+                    f"{row['probability']:.4f}",
+                    format_lithology_label(str(row["dominant_lith"])),
                 ]
             )
         table = Table(
             table_data,
-            colWidths=[0.6 * inch, 1.1 * inch, 1.1 * inch, 1.0 * inch, 2.2 * inch],
+            colWidths=[0.55 * inch, 1.15 * inch, 1.15 * inch, 0.95 * inch, 2.4 * inch],
+            repeatRows=1,
         )
         table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8E8E8")),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A3A52")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 9),
                     ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 9),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 1), (-1, -1), 9),
+                    ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                    ("ALIGN", (1, 0), (2, -1), "RIGHT"),
+                    ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F7FA")]),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C5CED6")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
                 ]
             )
         )
-        story.extend([table, Spacer(1, 0.15 * inch)])
+        story.extend([table, Spacer(1, 0.12 * inch)])
     else:
         story.append(Paragraph("No ranked targets are available for this AOI.", body_style))
 
@@ -309,11 +475,10 @@ def _write_pdf(
     if target_rationales:
         for rank, (cell_id, rationale_text) in enumerate(target_rationales, start=1):
             story.append(
-                Paragraph(
-                    f"<b>Target {rank} ({cell_id})</b><br/>{rationale_text}",
-                    body_style,
-                )
+                Paragraph(f"Target {rank} ({cell_id})", target_heading_style)
             )
+            story.append(_rationale_list_flowable(rationale_text, bullet_style))
+            story.append(Spacer(1, 0.08 * inch))
     else:
         story.append(Paragraph("No target rationales are available for this AOI.", body_style))
 
@@ -330,12 +495,14 @@ def _write_pdf(
         leftMargin=0.75 * inch,
         rightMargin=0.75 * inch,
         topMargin=0.75 * inch,
-        bottomMargin=0.75 * inch,
-        title=f"Lithium prospectivity report — {client.strip()}",
-        author="Pilot MVP pipeline",
+        bottomMargin=0.85 * inch,
+        title=f"{REPORT_TITLE} — {client.strip()}",
+        author=COMPANY_NAME,
         canvasmaker=_invariant_canvas,
     )
-    doc.build(story)
+    doc.client_name = client.strip()
+    doc.report_date = report_date
+    doc.build(story, onLaterPages=_content_page_footer)
     _set_fixed_pdf_dates(output_path)
 
 

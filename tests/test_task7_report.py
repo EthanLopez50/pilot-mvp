@@ -20,12 +20,23 @@ from pilot.maps import HEATMAP_FILENAME, heatmap_path
 from pilot.model_service import predict
 from pilot.report import (
     LIMITATIONS_TEXT,
+    LOGO_PATH,
     METHODOLOGY_SUMMARY,
     REPORT_FILENAME,
     REPORT_STATUS_TEXT,
     SECTION_REPORT_STATUS,
     build,
+    format_lithology_label,
     report_path,
+)
+
+# Minimal 1×1 JPEG for logo-embedding assertions (valid JFIF structure).
+_MINIMAL_JPEG = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xdb\x00C\x00" + bytes([8] * 64)
+    + b"\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+    + b"\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08"
+    + b"\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xaa\xff\xd9"
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +55,9 @@ SECTION_HEATMAP = "Prospectivity heatmap"
 SECTION_RANKED_TARGETS = "Ranked targets"
 SECTION_TARGET_RATIONALES = "Target rationales"
 SECTION_LIMITATIONS = "Limitations"
+COMPANY_NAME = "X-Ray Geoanalytics"
+REPORT_TITLE = "Lithium Prospectivity Assessment"
+FOOTER_TEXT = f"Produced by {COMPANY_NAME}"
 
 
 @pytest.fixture
@@ -168,6 +182,39 @@ def _normalize_pdf_text(text: str) -> str:
     return re.sub(r"\s+", " ", unescaped).strip()
 
 
+def _rationale_bullet_lines(rationale_text: str) -> list[str]:
+    lines: list[str] = []
+    for line in rationale_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("- "):
+            stripped = stripped[2:].strip()
+        lines.append(stripped)
+    return lines
+
+
+def _assert_no_orphaned_bullet_markers(text: str, rationale_text: str) -> None:
+    """Bullet glyphs must sit on the same line as the start of their text."""
+    for bullet_line in _rationale_bullet_lines(rationale_text):
+        snippet = bullet_line[:40]
+        assert snippet, "expected non-empty rationale bullet line"
+        assert not re.search(
+            rf"•\s*(?:\n|\r\n)\s*{re.escape(snippet[:20])}",
+            text,
+        ), f"Orphaned bullet marker before: {snippet[:20]!r}"
+        normalized_snippet = _normalize_pdf_text(snippet[:30])
+        assert (
+            f"• {_normalize_pdf_text(snippet[:30])}" in _normalize_pdf_text(text)
+            or normalized_snippet in _normalize_pdf_text(text)
+        ), f"Expected contiguous bullet text for: {snippet[:30]!r}"
+
+
+def _write_minimal_jpeg(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_MINIMAL_JPEG)
+
+
 def _assert_report_status_section(text: str, *, after_coverage: bool) -> None:
     normalized = _normalize_pdf_text(text)
     heading_pos = normalized.find(SECTION_REPORT_STATUS)
@@ -195,7 +242,7 @@ def _assert_report_status_section(text: str, *, after_coverage: bool) -> None:
     )
 
     if after_coverage:
-        coverage_pos = text.find(COVERAGE_HEADING)
+        coverage_pos = normalized.find(COVERAGE_HEADING)
         assert coverage_pos >= 0, "Expected coverage limitation heading in PDF text"
         assert coverage_pos < heading_pos, (
             "Coverage limitation must appear before Report status and scope"
@@ -264,6 +311,155 @@ def test_sample_aoi_writes_pdf_to_expected_outputs_path(
     assert heatmap_path(CLIENT_NAME).name == HEATMAP_FILENAME
 
 
+def test_logo_path_points_at_pilot_assets_logo_jpg() -> None:
+    expected = PROJECT_ROOT / "pilot" / "assets" / "logo.jpg"
+    assert LOGO_PATH == expected
+
+
+def test_pdf_embeds_logo_jpeg_when_logo_file_present(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+    logo_file = tmp_path / "logo.jpg"
+    _write_minimal_jpeg(logo_file)
+    monkeypatch.setattr("pilot.report.LOGO_PATH", logo_file)
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+
+    assert b"/DCTDecode" in pdf_path.read_bytes()
+
+
+def test_pdf_cover_has_no_jpeg_when_logo_file_missing(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+    missing_logo = tmp_path / "nonexistent" / "logo.jpg"
+    assert not missing_logo.is_file()
+    monkeypatch.setattr("pilot.report.LOGO_PATH", missing_logo)
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+
+    assert b"/DCTDecode" not in pdf_path.read_bytes()
+
+
+def test_ranked_targets_table_uses_readable_lithology_labels(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+    text = _extract_pdf_text(pdf_path)
+    normalized = _normalize_pdf_text(text)
+
+    ranked = features_df.copy()
+    ranked["_probability"] = probabilities
+    ranked = ranked.sort_values("_probability", ascending=False).head(config.TOP_N)
+    table_codes = set(ranked["dominant_lith"].astype(str))
+
+    assert "tuff_ignimbrite" in table_codes
+    assert "tuff_ignimbrite" not in text
+    assert format_lithology_label("tuff_ignimbrite") in normalized
+    assert format_lithology_label("lacustrine") in normalized
+    assert format_lithology_label("carbonate") in normalized
+    for code in table_codes:
+        assert code not in text or "_" not in code
+        assert format_lithology_label(code) in normalized
+
+
+def test_target_rationale_bullets_are_not_orphaned_from_text(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+    text = _extract_pdf_text(pdf_path)
+
+    rationales = rationale(features_df, probabilities)
+    for _cell_id, rationale_text in rationales.items():
+        _assert_no_orphaned_bullet_markers(text, rationale_text)
+
+
+def test_pdf_cover_page_includes_company_name_and_title(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+    text = _extract_pdf_text(pdf_path)
+    normalized = _normalize_pdf_text(text)
+
+    assert COMPANY_NAME in text
+    assert REPORT_TITLE in text
+    assert CLIENT_NAME in text
+    assert FIXED_REPORT_DATE.isoformat() in text
+    assert normalized.find(COMPANY_NAME) < normalized.find(SECTION_REPORT_STATUS), (
+        "Cover company name should appear before Report status and scope"
+    )
+
+
+def test_pdf_content_pages_include_producer_footer(
+    outputs_dir: Path,
+    sample_build_input: tuple[object, object, object, object],
+) -> None:
+    features_df, probabilities, aoi_polygon, coverage = sample_build_input
+
+    pdf_path = build(
+        features_df=features_df,
+        probabilities=probabilities,
+        client=CLIENT_NAME,
+        aoi_polygon=aoi_polygon,
+        coverage=coverage,
+        report_date=FIXED_REPORT_DATE,
+    )
+    text = _extract_pdf_text(pdf_path)
+
+    assert FOOTER_TEXT in text
+
+
 def test_pdf_contains_every_required_section_verbatim(
     outputs_dir: Path,
     sample_build_input: tuple[object, object, object, object],
@@ -298,7 +494,12 @@ def test_pdf_contains_every_required_section_verbatim(
 
     rationales = rationale(features_df, probabilities)
     for _cell_id, rationale_text in rationales.items():
-        assert _normalize_pdf_text(rationale_text) in normalized
+        for line in rationale_text.splitlines():
+            bullet = line.strip()
+            if bullet.startswith("- "):
+                bullet = bullet[2:].strip()
+            if bullet:
+                assert _normalize_pdf_text(bullet) in normalized
 
 
 def test_out_of_coverage_shows_coverage_limitation_before_methodology(

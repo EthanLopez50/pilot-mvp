@@ -16,6 +16,18 @@ from pilot.model_service import _load_artifacts
 # Strongest contributors included in each cell's rationale text.
 N_TOP_SHAP_FEATURES = 3
 
+# Human-readable feature names for rationale bullets (extend as needed).
+FEATURE_LABELS: dict[str, str] = {
+    "geochem_Li_max": "maximum stream-sediment lithium",
+    "geochem_Rb_median": "median stream-sediment rubidium",
+    "geochem_As_median": "median stream-sediment arsenic",
+    "pct_lacustrine": "lacustrine sediment coverage",
+    "dist_to_caldera_m": "distance to nearest caldera margin",
+    "dist_to_geothermal_m": "distance to mapped geothermal field",
+    "dist_to_geochem_anom_m": "distance to nearest geochemical anomaly",
+    "elev_min": "minimum elevation",
+}
+
 FeatureRationaleFn = Callable[[Any], str | None]
 
 
@@ -76,8 +88,9 @@ def rationale(
             shap_values[row_idx],
             feature_cols,
             raw_values[row_idx],
+            features_df=features_df,
         )
-        rationales[cell_id] = "; ".join(parts)
+        rationales[cell_id] = "\n".join(f"- {part}" for part in parts)
 
     return rationales
 
@@ -196,6 +209,8 @@ def _collect_rationale_parts(
     shap_row: np.ndarray,
     feature_cols: tuple[str, ...],
     raw_row: dict[str, Any],
+    *,
+    features_df: pd.DataFrame,
 ) -> list[str]:
     order = np.argsort(np.abs(shap_row))[::-1]
     parts: list[str] = []
@@ -205,7 +220,7 @@ def _collect_rationale_parts(
         if len(parts) >= N_TOP_SHAP_FEATURES:
             break
         feature = feature_cols[int(col_idx)]
-        part = _format_rationale_part(feature, raw_row[feature])
+        part = _format_rationale_part(feature, raw_row[feature], features_df=features_df)
         if part is None:
             continue
         geological = _geological_sentence(part)
@@ -221,13 +236,69 @@ def _geological_sentence(rationale_part: str) -> str:
     return rationale_part.split("): ", 1)[1]
 
 
-def _format_rationale_part(feature: str, raw_value: Any) -> str | None:
+def _feature_label(feature: str) -> str:
+    if feature in FEATURE_LABELS:
+        return FEATURE_LABELS[feature]
+    return _fallback_feature_label(feature)
+
+
+def _fallback_feature_label(feature: str) -> str:
+    name = feature
+    if name.startswith("dist_to_") and name.endswith("_m"):
+        inner = name[len("dist_to_") : -len("_m")].replace("_", " ")
+        return f"distance to {inner}"
+    for suffix in ("_count_10km", "_count", "_m", "_t"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name.replace("_", " ").title()
+
+
+def _format_rationale_part(
+    feature: str,
+    raw_value: Any,
+    *,
+    features_df: pd.DataFrame | None = None,
+) -> str | None:
     if feature not in FEATURE_RATIONALE:
         raise ValueError(f"No geological mapping for feature: {feature}")
     geological = FEATURE_RATIONALE[feature](raw_value)
     if geological is None:
         return None
-    return f"{feature} ({_format_feature_value(feature, raw_value)}): {geological}"
+    label = _feature_label(feature)
+    value_text = _format_feature_value(feature, raw_value)
+    if features_df is not None:
+        value_text = f"{value_text}{_aoi_metric_context(feature, raw_value, features_df)}"
+    return f"{label} ({value_text}): {geological}"
+
+
+def _aoi_metric_context(
+    feature: str,
+    raw_value: Any,
+    features_df: pd.DataFrame,
+) -> str:
+    """Percentile context from AOI feature values when enough data exist."""
+    if feature not in features_df.columns:
+        return ""
+    if feature in ("dominant_lith", "closed_basin_indicator"):
+        return ""
+    if pd.isna(raw_value):
+        return ""
+    series = pd.to_numeric(features_df[feature], errors="coerce").dropna()
+    if len(series) < 10:
+        return ""
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return ""
+    if pd.isna(value):
+        return ""
+    rank_pct = float((series <= value).mean())
+    if rank_pct >= 0.9:
+        return ", highest decile in this AOI"
+    if rank_pct <= 0.1:
+        return ", lowest decile in this AOI"
+    return ""
 
 
 def _format_feature_value(feature: str, raw_value: Any) -> str:
@@ -237,14 +308,35 @@ def _format_feature_value(feature: str, raw_value: Any) -> str:
         return "yes" if int(float(raw_value)) == 1 else "no"
     if feature.startswith("pct_"):
         return f"{float(raw_value) * 100:.1f}%"
+    if _is_geochem_concentration(feature):
+        return f"{float(raw_value):.1f} ppm"
     if feature.endswith("_m"):
-        return f"{float(raw_value):.0f} m"
+        return _format_distance_value(raw_value)
+    if feature.startswith("elev_"):
+        return f"{float(raw_value):,.0f} m"
     if feature.endswith("_t") or feature == "hotsprings_temp_max":
         return f"{float(raw_value):.1f} C"
     if feature.endswith("_count") or feature.endswith("_count_10km"):
         return f"{float(raw_value):.0f}"
     if pd.isna(raw_value):
         return "missing"
+    return _format_scalar_value(raw_value)
+
+
+def _is_geochem_concentration(feature: str) -> bool:
+    return feature.startswith("geochem_") and (
+        feature.endswith("_median") or feature.endswith("_max")
+    )
+
+
+def _format_distance_value(raw_value: Any) -> str:
+    distance = float(raw_value)
+    if distance >= 1000.0:
+        return f"{distance / 1000.0:.1f} km"
+    return f"{distance:,.0f} m"
+
+
+def _format_scalar_value(raw_value: Any) -> str:
     value = float(raw_value)
     if value == int(value):
         return str(int(value))
